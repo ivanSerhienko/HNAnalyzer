@@ -1,0 +1,1 @@
+This project is designed to analyze reddit topic and popular descussions in real time
