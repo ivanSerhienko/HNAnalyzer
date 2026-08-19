@@ -23,8 +23,34 @@ more logged out users."
 
 ## Architecture / components
 
-New package member `ingest/RedditAuth.scala`, alongside the existing
-`ingest/RedditClient.scala`:
+Two new files alongside the existing `ingest/RedditClient.scala`:
+
+### `ingest/RedditCredentialsProvider.scala`
+
+Owns sourcing credentials (from `REDDIT_CLIENT_ID_FILE`/
+`REDDIT_CLIENT_SECRET_FILE`, see Secrets below) and keeping them
+fresh — a separate responsibility from turning credentials into a token
+(that's `RedditAuth`, below), matching the project's pattern of one
+service per concern.
+
+- `case class RedditCredentials(clientId: String, clientSecret: String)`
+- `trait RedditCredentialsProvider { def current: UIO[RedditCredentials] }`
+  — never fails; always returns the latest known-good value.
+- `RedditCredentialsProvider.Live` — constructed from two file paths
+  (see Secrets below). At construction, reads both files once via
+  `ZIO.attemptBlockingIO(java.nio.file.Files.readString(path).trim)`;
+  this initial read must succeed or layer construction fails (no
+  known-good value exists yet). The result seeds a `Ref[RedditCredentials]`.
+  A background fiber, forked with `ZIO.forkScoped` (so its lifetime is
+  tied to the layer's `Scope` and it's cleaned up on shutdown), loops
+  every 60 seconds (hardcoded, not configurable this slice): re-read both
+  files; if the value changed, `ZIO.logInfo` and update the `Ref`; if the
+  read fails, `ZIO.logWarning` with the failure reason and keep serving
+  the previous value — a transient read failure never crashes the poller
+  or the app.
+- `RedditCredentialsProvider.live: ZLayer[Any, Throwable, RedditCredentialsProvider]`
+
+### `ingest/RedditAuth.scala`
 
 - `trait RedditAuth { def getToken: Task[String] }`
 - `RedditAuth.CachedToken(token: String, expiresAt: Instant)` — the cached
@@ -34,13 +60,17 @@ New package member `ingest/RedditAuth.scala`, alongside the existing
   is more than 60 seconds in the future (a small safety margin so a
   request doesn't start with a token that expires mid-flight).
   Independently unit-testable, same seam as `RedditClient.handleResponse`.
-- `RedditAuth.Live` — holds a `Ref[Option[CachedToken]]` plus the client
-  ID/secret. `getToken`: read the ref; if `isValid` on the cached value,
-  return its token; otherwise POST for a fresh one (see below), cache it,
-  return it.
-- `RedditAuth.live: ZLayer[Client, Throwable, RedditAuth]` — reads
-  `REDDIT_CLIENT_ID`/`REDDIT_CLIENT_SECRET` from the environment at
-  construction (see Secrets below) and initializes the `Ref` empty.
+- `RedditAuth.Live` — depends on `Client` and `RedditCredentialsProvider`;
+  holds a `Ref[Option[CachedToken]]`. `getToken`: read the ref; if
+  `isValid` on the cached value, return its token; otherwise call
+  `RedditCredentialsProvider.current` for the latest credentials, POST for
+  a fresh token (see below), `ZIO.logInfo` the refresh (expiry only, never
+  the token value), cache it, return it. Because credentials are re-read
+  from the provider on every refresh (not captured once at construction),
+  a rotated secret takes effect on the next token fetch after the
+  provider's poll picks it up — no restart needed.
+- `RedditAuth.live: ZLayer[Client & RedditCredentialsProvider, Nothing, RedditAuth]`
+  initializes the `Ref` empty.
 
 `RedditClient.Live` gains a `RedditAuth` dependency (alongside `Client`):
 before issuing the data request, it calls `RedditAuth.getToken` and adds
@@ -95,19 +125,37 @@ fixed-shape response (`access_token`, `expires_in`); still no general
 JSON parsing of Reddit's data payloads — that remains out of scope,
 deferred to the Analyze stage.
 
+No logging dependency is added. `RedditCredentialsProvider`, `RedditAuth`,
+and `RedditClient` all use ZIO's built-in `ZIO.logInfo`/`logWarning`/
+`logError`/`logDebug` — structured, leveled logging with zero extra
+dependencies (its default console output format is already visible in
+earlier `sbt run` failures in this project). **Rule for every log line
+added in this slice: never log the actual client secret, client ID, or
+bearer token value** — only metadata (timestamps, expiry, status codes,
+file paths, byte counts).
+
 ## Secrets
 
-Two new environment variables, read via `zio.System.env` (no new config
-library — consistent with CLAUDE.md's existing "config via environment
-variables" convention):
+Two environment variables — now holding **file paths**, not raw secret
+values, so credentials can be rotated by updating the file's contents
+without restarting the app (the standard Docker/Kubernetes-secrets
+convention: mount a secret as a file, point an env var at its path):
 
-- `REDDIT_CLIENT_ID`
-- `REDDIT_CLIENT_SECRET`
+- `REDDIT_CLIENT_ID_FILE`
+- `REDDIT_CLIENT_SECRET_FILE`
 
-If either is unset, `RedditAuth.live`'s layer construction fails
-immediately with a clear message (e.g.
-`"REDDIT_CLIENT_ID environment variable is not set"`), rather than
-surfacing as a confusing HTTP error later.
+Reading environment variables directly (as the original design in this
+spec had it) cannot support rotation without a restart: a process's env
+vars are fixed at OS process-start time on every mainstream platform and
+never change afterward, no matter what the parent shell or orchestrator's
+environment does later. A polled file is the mechanism that actually
+allows a rotated secret to take effect live — see
+`RedditCredentialsProvider` above.
+
+If either env var is unset, or its file can't be read at startup,
+`RedditCredentialsProvider.live`'s layer construction fails immediately
+with a clear message, rather than surfacing as a confusing HTTP error
+later.
 
 Registering the Reddit app itself (a "script" type app at
 reddit.com/prefs/apps) is a manual step only the user can do — out of
@@ -115,16 +163,25 @@ scope for code, covered separately with setup instructions.
 
 ## Data flow
 
-`Main` → `RedditClient.fetchBest` → `RedditAuth.getToken` (cache hit, or a
+`Main` → `RedditClient.fetchBest` → `RedditAuth.getToken` (cache hit, or:
+`RedditCredentialsProvider.current` for the latest credentials, then a
 fresh POST to `https://www.reddit.com/api/v1/access_token`) →
 `RedditClient` issues `GET https://oauth.reddit.com/best.json` with
 `Authorization: Bearer <token>` and the existing
 `User-Agent: RedditAnalyzer/0.1` → `handleResponse` (unchanged, still
 checks status and reads the body) → printed by `Main`.
 
+Independently, `RedditCredentialsProvider`'s background fiber polls its
+two files every 60 seconds for the life of the app, keeping the `Ref`
+current regardless of whether a fetch is in flight.
+
 ## Error handling
 
-- Missing env vars: layer construction fails at startup (see Secrets).
+- Missing env vars or unreadable credential files at startup: layer
+  construction fails (see Secrets).
+- A transient credential-file read failure during a poll: logged as a
+  warning, previous credentials retained, app keeps running (see
+  `RedditCredentialsProvider` above).
 - Token endpoint request: wrapped in the same `.timeout(30.seconds)`
   policy as the data fetch; a non-2xx response fails clearly with a
   status-including message, the same shape of check as
@@ -141,29 +198,51 @@ checks status and reads the body) → printed by `Main`.
   That's a retry policy, deliberately deferred, same reasoning as the
   original ingest-client spec's stance on retries.
 
+## Logging
+
+Every action gets a leveled ZIO log line (never the secret/token values
+themselves — see Dependency above):
+
+| Component | Event | Level |
+|---|---|---|
+| `RedditCredentialsProvider` | Initial credentials loaded (file paths only) | INFO |
+| `RedditCredentialsProvider` | Poll detects a changed credential, reloading | INFO |
+| `RedditCredentialsProvider` | Poll failed to read a file, retaining previous value | WARNING |
+| `RedditAuth` | Fetching a new OAuth token (cache miss/expired) | INFO |
+| `RedditAuth` | Token refreshed, with its expiry time | INFO |
+| `RedditAuth` | Serving a cached token (cache hit) | DEBUG (quiet by default; avoids per-request noise once the polling loop lands) |
+| `RedditAuth` | Token fetch failed, with status | ERROR |
+| `RedditClient` | Fetching `best.json` | INFO |
+| `RedditClient` | Fetch succeeded, with byte count | INFO |
+
 ## Testing
 
-One new unit test (`RedditAuthSpec`) covering `RedditAuth.isValid`
-directly — no `Client`/`Ref` faking needed, same pattern as
+Two new unit tests, same "extract the pure part" pattern as
 `RedditClientSpec`:
 
-- `None` → `false`
-- `Some(CachedToken(_, expiresAt = far future))` → `true`
-- `Some(CachedToken(_, expiresAt = in the past))` → `false`
+- `RedditAuthSpec` covering `RedditAuth.isValid` directly — no
+  `Client`/`Ref` faking needed:
+  - `None` → `false`
+  - `Some(CachedToken(_, expiresAt = far future))` → `true`
+  - `Some(CachedToken(_, expiresAt = in the past))` → `false`
 
-The actual token-fetch network call and `Ref` mutation are not
-unit-tested, consistent with `RedditClient.Live.fetchBest` today.
+`RedditCredentialsProvider.Live` (file I/O, `Ref`, background fiber) and
+`RedditAuth.Live`/`RedditClient.Live` (network I/O) are not unit-tested,
+consistent with the project's existing stance on `Live` implementations.
 Manual verification: run `sbt run` with real credentials set and confirm
 JSON prints to stdout (this is also what finally closes out the previous
 slice's still-open acceptance criterion — nobody has seen the success
-path execute yet).
+path execute yet), plus a manual check that editing the credential files
+while the app is running produces the "credentials rotated" log line
+within 60 seconds.
 
 ## Documentation update
 
 `CLAUDE.md`'s "Environment/secrets" section changes from "No Reddit API
-credentials are needed" to documenting `REDDIT_CLIENT_ID`/
-`REDDIT_CLIENT_SECRET`; the "Ingest" architecture bullet drops "No
-OAuth/API credentials are used."
+credentials are needed" to documenting `REDDIT_CLIENT_ID_FILE`/
+`REDDIT_CLIENT_SECRET_FILE` (file paths, not raw values — see Secrets);
+the "Ingest" architecture bullet drops "No OAuth/API credentials are
+used" and gains a line about credential rotation via polled files.
 
 ## Explicitly out of scope for this slice
 
@@ -174,3 +253,8 @@ OAuth/API credentials are used."
   response is decoded)
 - Registering the Reddit app in the browser (manual step, covered
   separately from code)
+- A configurable poll interval (hardcoded to 60 seconds)
+- Any logging *library* (Logback/SLF4J) — plain ZIO logging only
+- Eagerly invalidating a cached OAuth token when credentials rotate
+  mid-lifetime — a still-valid cached token keeps being used until its
+  own expiry; rotation only affects the *next* token fetch
