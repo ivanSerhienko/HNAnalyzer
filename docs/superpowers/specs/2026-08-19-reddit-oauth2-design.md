@@ -39,15 +39,23 @@ service per concern.
 - `RedditCredentialsProvider.Live` — constructed from two file paths
   (see Secrets below). At construction, reads both files once via
   `ZIO.attemptBlockingIO(java.nio.file.Files.readString(path).trim)`;
-  this initial read must succeed or layer construction fails (no
-  known-good value exists yet). The result seeds a `Ref[RedditCredentials]`.
+  a blank (empty after trimming) value is treated as a failure, same as
+  an unreadable file — both are local misconfiguration, not a Reddit-side
+  condition, and get the same clear-message treatment. This initial read
+  must succeed or layer construction fails (no known-good value exists
+  yet). Failures are wrapped in a descriptive `RuntimeException`
+  (e.g. `"Cannot read Reddit credential file at $path: ..."`), the same
+  treatment already used for a missing env var, so every startup-failure
+  path reads consistently. The result seeds a `Ref[RedditCredentials]`.
   A background fiber, forked with `ZIO.forkScoped` (so its lifetime is
   tied to the layer's `Scope` and it's cleaned up on shutdown), loops
   every 60 seconds (hardcoded, not configurable this slice): re-read both
-  files; if the value changed, `ZIO.logInfo` and update the `Ref`; if the
-  read fails, `ZIO.logWarning` with the failure reason and keep serving
-  the previous value — a transient read failure never crashes the poller
-  or the app.
+  files through the same read-and-validate function used at startup; if
+  the value changed, `ZIO.logInfo` and update the `Ref`; if the read
+  fails (missing, unreadable, or blank — the same function, so the same
+  failure modes), `ZIO.logWarning` with the failure reason and keep
+  serving the previous value — a transient read failure never crashes the
+  poller or the app.
 - `RedditCredentialsProvider.live: ZLayer[Any, Throwable, RedditCredentialsProvider]`
 
 ### `ingest/RedditAuth.scala`
@@ -258,3 +266,9 @@ used" and gains a line about credential rotation via polled files.
 - Eagerly invalidating a cached OAuth token when credentials rotate
   mid-lifetime — a still-valid cached token keeps being used until its
   own expiry; rotation only affects the *next* token fetch
+- Concurrent-call token-fetch deduplication — `RedditAuth.getToken` has
+  no single-flight/mutex guard, so concurrent callers during a cache
+  miss would each independently fire their own token request. No caller
+  in this slice issues concurrent `getToken` calls (`Main` calls
+  `fetchBest` exactly once per run), so this can't manifest yet; revisit
+  if/when the continuous polling loop introduces overlapping fetches
