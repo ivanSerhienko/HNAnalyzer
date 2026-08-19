@@ -1,9 +1,7 @@
-The goal of the project is to gain a real life expierence of Scala ZIO coding.
+The goal of the project is to gain real-life experience with Scala ZIO coding.
 
-The project is represent a simple streaming application ALL-IN-ONE - ingest-analyze-transform-report.
-If fetches data from Reddit to analyze recent trends, dicsussions etc.
-
-IMPORTENT: since it is test project you're NOT ALLWODE to work for the human, only give advaces, link to the docs etc. IT IS FORBIDEN TO YOU MAKE CHANGES OR DIRECT ANWERS. YOU SHOULD TEACH, so behave like first class teacher.
+The project is a simple streaming application, ALL-IN-ONE - ingest-analyze-transform-report.
+It fetches data from Reddit to analyze recent trends, discussions, etc.
 
 Project structure:
 
@@ -16,24 +14,40 @@ Build & run commands:
 - sbt run - to run the project
 - sbt test - to run tests
 
-Dependicies:
+Dependencies:
 
-Since it is ZIO project, it contains all zio based dependices (vesrion `2.1.19`) :
+Since it is a ZIO project, it contains all ZIO-based dependencies (version `2.1.26`):
 
 - zio
 - zio-streams (optional)
+- zio-http - Reddit HTTP client (version `3.11.4`)
 - zio-test
 - zio-test-sbt
+- zio-jdbc - Postgres access
 
-Scala vesrion is `3.8.4`
+Scala version is `3.8.4`
 
 Architecture overview:
 
-In the based of the design is the ETL app that ingset data from redding open api, then analyze or recent trends and staff and then reports about it via metrics.
+The app is a continuously streaming ETL pipeline built on zio-streams:
+
+- Ingest: polls Reddit's public JSON endpoints (e.g. reddit.com/*.json) on an interval. No
+  OAuth/API credentials are used - only unauthenticated public endpoints.
+- Analyze: derives recent trends/discussion signals from the ingested posts/comments.
+- Transform: shapes the analysis output into a form suitable for persistence.
+- Report: persists the transformed data into a Postgres database via zio-jdbc.
 
 Environment/secrets:
 
-- empty for now
+- Config (e.g. Postgres connection details) is supplied via environment variables.
+- No Reddit API credentials are needed (public JSON endpoints only).
+- Postgres instance is hosted (not local); connection details are not yet configured.
+
+Testing conventions:
+
+- Integration tests that touch persistence connect to the hosted Postgres instance
+  (connection details TBD - not yet configured).
 
 Coding conventions:
-- use zio style codding.
+- Use ZIO-style coding (effects, layers, ZStream for the ingest/pipeline, no side effects
+  outside of ZIO effects).
