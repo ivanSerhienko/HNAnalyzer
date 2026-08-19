@@ -108,12 +108,20 @@ object RedditCredentialsProvider {
     }
 
   private def readFile(path: String): Task[String] =
-    ZIO.attemptBlockingIO(java.nio.file.Files.readString(java.nio.file.Path.of(path)).trim)
+    ZIO
+      .attemptBlockingIO(java.nio.file.Files.readString(java.nio.file.Path.of(path)).trim)
+      .mapError(error => new RuntimeException(s"Cannot read Reddit credential file at $path: ${error.getMessage}"))
 
   private def loadCredentials(clientIdPath: String, clientSecretPath: String): Task[RedditCredentials] =
     for {
       clientId     <- readFile(clientIdPath)
       clientSecret <- readFile(clientSecretPath)
+      _            <- ZIO.when(clientId.isEmpty)(
+                        ZIO.fail(new RuntimeException(s"Reddit credential file at $clientIdPath is empty")),
+                      )
+      _            <- ZIO.when(clientSecret.isEmpty)(
+                        ZIO.fail(new RuntimeException(s"Reddit credential file at $clientSecretPath is empty")),
+                      )
     } yield RedditCredentials(clientId, clientSecret)
 
   final case class Live(ref: Ref[RedditCredentials]) extends RedditCredentialsProvider {
@@ -167,7 +175,8 @@ Sources REDDIT_CLIENT_ID_FILE/REDDIT_CLIENT_SECRET_FILE and polls
 them every 60s so a rotated secret takes effect without an app
 restart. A transient read failure during a poll is logged and the
 previous value keeps being served; only the initial read at startup
-is fatal.
+is fatal. A blank credential value is treated as a read failure, and
+failures are wrapped with the offending path for a clear message.
 EOF
 )"
 ```
@@ -214,6 +223,16 @@ object RedditAuthSpec extends ZIOSpecDefault {
       val now    = Instant.now()
       val cached = Some(RedditAuth.CachedToken("token", now.minusSeconds(10)))
       assertTrue(!RedditAuth.isValid(cached, now))
+    },
+    test("isValid is false when the cached token expires in 59 seconds (inside the safety margin)") {
+      val now    = Instant.now()
+      val cached = Some(RedditAuth.CachedToken("token", now.plusSeconds(59)))
+      assertTrue(!RedditAuth.isValid(cached, now))
+    },
+    test("isValid is true when the cached token expires in 61 seconds (outside the safety margin)") {
+      val now    = Instant.now()
+      val cached = Some(RedditAuth.CachedToken("token", now.plusSeconds(61)))
+      assertTrue(RedditAuth.isValid(cached, now))
     },
   )
 }
@@ -317,7 +336,7 @@ object RedditAuth {
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `sbt -batch "testOnly ingest.RedditAuthSpec"`
-Expected: PASS — 3 tests passed.
+Expected: PASS — 5 tests passed.
 
 - [ ] **Step 5: Compile the whole project**
 
