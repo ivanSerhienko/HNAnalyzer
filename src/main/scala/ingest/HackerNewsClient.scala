@@ -2,15 +2,63 @@ package ingest
 
 import zio._
 import zio.http._
+import zio.json._
+
+// HN's item API is a single flat, polymorphic shape: which fields are
+// present depends on `type` (story/comment/job/...) and on deletion state.
+final case class Item(
+  id: Long,
+  `type`: Option[String] = None,
+  by: Option[String] = None,
+  time: Option[Long] = None,
+  text: Option[String] = None,
+  dead: Option[Boolean] = None,
+  deleted: Option[Boolean] = None,
+  parent: Option[Long] = None,
+  kids: Option[List[Long]] = None,
+  url: Option[String] = None,
+  score: Option[Int] = None,
+  title: Option[String] = None,
+  descendants: Option[Int] = None,
+) derives JsonDecoder
+
+enum Listing derives CanEqual:
+  case Top, New, Ask, Show
+
+  def path: String = this match
+    case Listing.Top  => "/topstories.json"
+    case Listing.New  => "/newstories.json"
+    case Listing.Ask  => "/askstories.json"
+    case Listing.Show => "/showstories.json"
+
+final case class HnConfig(baseUrl: String)
+
+object HnConfig {
+  // Reads the real OS environment directly, not via ZIO's `System` service -
+  // see storage.PostgresConfig for why (TestSystem returns empty under
+  // zio-test's ZIOSpecDefault).
+  val fromEnv: Task[HnConfig] =
+    ZIO
+      .attempt(Option(java.lang.System.getenv("HN_API_BASE_URL")))
+      .someOrFail(
+        new RuntimeException(
+          "Missing required environment variable: HN_API_BASE_URL (copy .env.example to .env and fill it in)",
+        ),
+      )
+      .map(HnConfig(_))
+}
 
 trait HackerNewsClient {
-  def fetchBest: Task[String]
+  def fetchListing(listing: Listing): Task[List[Long]]
+
+  // Returns the raw JSON body, not a decoded `Item` - callers that need to
+  // persist bronze data must keep the verbatim response (see spec:
+  // docs/superpowers/specs/2026-08-20-hn-medallion-analysis-design.md).
+  // Decode locally via `raw.fromJson[Item]` where structured fields are needed.
+  def fetchItem(id: Long): Task[String]
 }
 
 object HackerNewsClient {
-
-  private val bestUrl = "https://hacker-news.firebaseio.com/v0/topstories.json"
-  private def itemUrl(id: String) = s"https://hacker-news.firebaseio.com/v0/item/$id.json"
 
   private val userAgentHeader: Header.UserAgent =
     Header.UserAgent(
@@ -27,40 +75,37 @@ object HackerNewsClient {
         ),
       )
 
-  // POC-only crude parsing: pull the first element out of a `"key":[...]` array
-  // in a raw JSON string. No JSON lib yet - just proving the shape of the data.
-  private def firstArrayElement(json: String, key: String): Option[String] = {
-    val marker = s"\"$key\":["
-    val start  = json.indexOf(marker)
-    if (start < 0) None
-    else {
-      val afterMarker = json.substring(start + marker.length)
-      val end         = afterMarker.indexOf(']')
-      afterMarker.substring(0, end).split(",").headOption.map(_.trim)
+  def decodeJson[A](body: String)(using decoder: JsonDecoder[A]): Task[A] =
+    ZIO.fromEither(decoder.decodeJson(body)).mapError { error =>
+      new RuntimeException(s"Failed to decode Hacker News response: $error")
     }
-  }
 
-  final case class Live(client: Client) extends HackerNewsClient {
+  final case class Live(client: Client, baseUrl: String) extends HackerNewsClient {
     private def get(url: String): Task[String] =
       client.batched(Request.get(url).addHeader(userAgentHeader)).flatMap(handleResponse)
 
-    override def fetchBest: Task[String] =
-      (for {
-        listBody    <- get(bestUrl)
-        firstId      = listBody.stripPrefix("[").stripSuffix("]").split(",").head.trim
-        storyBody   <- get(itemUrl(firstId))
-        commentBody <- firstArrayElement(storyBody, "kids") match {
-                         case Some(commentId) => get(itemUrl(commentId))
-                         case None            => ZIO.succeed("(story has no comments)")
-                       }
-      } yield s"STORY:\n$storyBody\n\nFIRST COMMENT:\n$commentBody")
+    override def fetchListing(listing: Listing): Task[List[Long]] =
+      (get(baseUrl + listing.path).flatMap(decodeJson[List[Long]]))
+        .timeout(30.seconds)
+        .someOrFail(new RuntimeException("Request to Hacker News timed out after 30s"))
+
+    override def fetchItem(id: Long): Task[String] =
+      get(s"$baseUrl/item/$id.json")
         .timeout(30.seconds)
         .someOrFail(new RuntimeException("Request to Hacker News timed out after 30s"))
   }
 
-  val live: ZLayer[Client, Nothing, HackerNewsClient] =
-    ZLayer.fromFunction(Live.apply _)
+  val live: ZLayer[Client, Throwable, HackerNewsClient] =
+    ZLayer.fromZIO {
+      for {
+        config <- HnConfig.fromEnv
+        client <- ZIO.service[Client]
+      } yield Live(client, config.baseUrl)
+    }
 
-  def fetchBest: ZIO[HackerNewsClient, Throwable, String] =
-    ZIO.serviceWithZIO[HackerNewsClient](_.fetchBest)
+  def fetchListing(listing: Listing): ZIO[HackerNewsClient, Throwable, List[Long]] =
+    ZIO.serviceWithZIO[HackerNewsClient](_.fetchListing(listing))
+
+  def fetchItem(id: Long): ZIO[HackerNewsClient, Throwable, String] =
+    ZIO.serviceWithZIO[HackerNewsClient](_.fetchItem(id))
 }

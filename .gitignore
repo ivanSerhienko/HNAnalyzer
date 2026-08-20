@@ -3,6 +3,9 @@
 docs/
 docs/*
 
+# Secrets / local config
+.env
+
 ### Scala ###
 *.class
 *.log
@@ -61,7 +64,6 @@ Temporary Items
 
 ### VisualStudioCode ###
 .vscode/*
-.vscode/
 !.vscode/settings.json
 !.vscode/tasks.json
 !.vscode/launch.json
@@ -84,5 +86,7 @@ Temporary Items
 .bloop/
 .bsp/
 .scala-build/
-project/
-project/**/metals.sbt
+project/project/
+project/target/
+project/.bloop/
+project/metals.sbt

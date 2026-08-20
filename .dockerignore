@@ -1,0 +1,15 @@
+.git
+target
+project/target
+project/project
+.bloop
+.metals
+.bsp
+.scala-build
+.vscode
+.superpowers
+docs
+db
+.env
+.env.example
+README.md
