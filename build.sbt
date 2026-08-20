@@ -1,5 +1,7 @@
 ThisBuild / scalaVersion := "3.8.4"
 
+name := "HNAnalyzer"
+
 val zioVersion = "2.1.26"
 
 libraryDependencies ++= Seq(
