@@ -1,11 +1,11 @@
 import zio._
 import zio.http.Client
 
-import ingest.RedditClient
+import ingest.HackerNewsClient
 
 object App extends ZIOAppDefault {
   def run =
-    RedditClient.fetchBest
+    HackerNewsClient.fetchBest
       .flatMap(Console.printLine(_))
-      .provide(RedditClient.live, Client.default)
+      .provide(HackerNewsClient.live, Client.default)
 }
