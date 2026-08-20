@@ -1,7 +1,7 @@
 The goal of the project is to gain real-life experience with Scala ZIO coding.
 
 The project is a simple streaming application, ALL-IN-ONE - ingest-analyze-transform-report.
-It fetches data from Reddit to analyze recent trends, discussions, etc.
+It fetches data from Hacker News to analyze recent trends, discussions, etc.
 
 Project structure:
 
@@ -20,7 +20,7 @@ Since it is a ZIO project, it contains all ZIO-based dependencies (version `2.1.
 
 - zio
 - zio-streams (optional)
-- zio-http - Reddit HTTP client (version `3.11.4`)
+- zio-http - Hacker News HTTP client (version `3.11.4`)
 - zio-test
 - zio-test-sbt
 - zio-jdbc - Postgres access
@@ -31,8 +31,10 @@ Architecture overview:
 
 The app is a continuously streaming ETL pipeline built on zio-streams:
 
-- Ingest: polls Reddit's public JSON endpoints (e.g. reddit.com/*.json) on an interval. No
-  OAuth/API credentials are used - only unauthenticated public endpoints.
+- Ingest: polls Hacker News's public Firebase-backed API
+  (hacker-news.firebaseio.com) on an interval - story listings (top/new/ask/show),
+  individual items, and nested comment trees. No API key or OAuth is needed; the
+  API is fully open and unauthenticated, with no published rate limit.
 - Analyze: derives recent trends/discussion signals from the ingested posts/comments.
 - Transform: shapes the analysis output into a form suitable for persistence.
 - Report: persists the transformed data into a Postgres database via zio-jdbc.
@@ -40,7 +42,8 @@ The app is a continuously streaming ETL pipeline built on zio-streams:
 Environment/secrets:
 
 - Config (e.g. Postgres connection details) is supplied via environment variables.
-- No Reddit API credentials are needed (public JSON endpoints only).
+- No Hacker News API credentials are needed (the public API requires no
+  authentication).
 - Postgres instance is hosted (not local); connection details are not yet configured.
 
 Testing conventions:
