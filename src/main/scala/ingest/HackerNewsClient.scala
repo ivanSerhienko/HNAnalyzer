@@ -34,9 +34,6 @@ enum Listing derives CanEqual:
 final case class HnConfig(baseUrl: String)
 
 object HnConfig {
-  // Reads the real OS environment directly, not via ZIO's `System` service -
-  // see storage.PostgresConfig for why (TestSystem returns empty under
-  // zio-test's ZIOSpecDefault).
   val fromEnv: Task[HnConfig] =
     ZIO
       .attempt(Option(java.lang.System.getenv("HN_API_BASE_URL")))
@@ -51,15 +48,14 @@ object HnConfig {
 trait HackerNewsClient {
   def fetchListing(listing: Listing): Task[List[Long]]
 
-  // Returns the raw JSON body, not a decoded `Item` - callers that need to
-  // persist bronze data must keep the verbatim response (see spec:
-  // docs/superpowers/specs/2026-08-20-hn-medallion-analysis-design.md).
+  // Returns the raw JSON body
   // Decode locally via `raw.fromJson[Item]` where structured fields are needed.
   def fetchItem(id: Long): Task[String]
 }
 
 object HackerNewsClient {
 
+  // HN rejects to provide data wihtout header
   private val userAgentHeader: Header.UserAgent =
     Header.UserAgent(
       Header.UserAgent.ProductOrComment.Product("HNAnalyzer", Some("0.1")),

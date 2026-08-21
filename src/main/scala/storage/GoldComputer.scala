@@ -10,7 +10,6 @@ trait GoldComputer {
   def computeStoryVelocity(pollId: UUID): Task[Long]
   def computeDomainStats(pollId: UUID): Task[Long]
 
-  // Read-only lookups over this cycle's gold rows, for reporting/logging.
   def topTrendingKeywords(pollId: UUID, limit: Int): Task[List[(String, Double)]]
   def topVelocity(pollId: UUID, limit: Int): Task[List[(Long, Double)]]
   def topRisingDomains(pollId: UUID, limit: Int): Task[List[(String, String)]]

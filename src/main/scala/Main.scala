@@ -14,7 +14,6 @@ object App extends ZIOAppDefault {
   private val storiesPerListing = 3
   private val goldTopN          = 5
 
-  // Testing value - bump to spec 1's 30 minutes once the pipeline is proven out.
   private val pollInterval = 30.minutes
 
   private def writeBronze(
